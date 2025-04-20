@@ -6,52 +6,42 @@ on:
         description: 'Force Version Override?'
         required: false
         type: string
-        default: ""
       chart_overwrite:
         description: 'Force Chart Overwrite?'
         required: true
         type: boolean
-        default: false
       git_branch:
         description: 'Git branch to checkout'
         required: false
         type: string
-        default: ""
       pre_build_script:
         description: 'Pre-build script to run'
         required: false
         type: string
-        default: ""
       is_lib_chart:
         description: 'Is this a library chart?'
         required: false
         type: boolean
-        default: false
       custom-image-name:
         description: 'Custom image name'
         required: false
         type: string
-        default: ""
       build-target:
         description: 'Docker build target'
         required: false
         type: string
-        default: ""
       docker-build-args:
         description: 'Docker build arguments'
         required: false
         type: string
-        default: ""
       dockerfile-path:
         description: 'Path to Dockerfile'
         required: false
         type: string
-        default: "Dockerfile"
       docker-arch:
         description: 'Docker architectures to build'
         required: false
         type: string
-        default: "linux/amd64,linux/arm64"
   push:
     tags:
       - 'v?*.*.*'
@@ -67,11 +57,11 @@ on:
 
 # Global environment variables
 env:
-  DOCKER_HUB_USER: "owolabi16" # VERIFY: Change to your Docker Hub username
+  DOCKER_HUB_USER: "owolabialiu" 
   GPT_CHART_DIR: "chart"
   HELM_TEMPLATE: "template.yaml"
   REGISTRY: "ghcr.io"
-  CHART_OVERWRITE: ${{ inputs.chart_overwrite }}
+  CHART_OVERWRITE: "false"
 
 # Set default permissions
 permissions:
@@ -164,18 +154,18 @@ jobs:
         uses: appany/helm-oci-chart-releaser@v0.4.0
         with:
           name: ${{ env.CHART_NAME }}
-          repository: owolabi16/charts # VERIFY: Change to your repository
+          repository: owolabialiu/charts 
           tag: ${{ env.CHART_TAG }}
           path: ${{ env.GPT_CHART_DIR }}
           registry: ghcr.io
-          registry_username: Owolabi16 # VERIFY: Change to your GitHub username
+          registry_username: owolabialiu
           registry_password: ${{ secrets.PAT_TOKEN }}
         env:
           HELM_EXPERIMENTAL_OCI: 1      
 
   build-image:
     runs-on: ubuntu-latest
-    needs: build-chart # Fixed circular dependency
+    needs: build-chart
     outputs:
       docker-tag: ${{ steps.meta.outputs.version }}
       docker-repo: ${{ steps.docker-repo.outputs.DOCKER_REPOSITORY }}
