@@ -95,7 +95,6 @@ jobs:
           password: ${{ secrets.PAT_TOKEN }}
 
       - name: Run Pre-Build User-defined script
-        if: inputs.pre_build_script != ''
         run: bash -c '${{ inputs.pre_build_script }}'
 
       - name: Generate Docs
