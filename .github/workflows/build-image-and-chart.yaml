@@ -58,7 +58,7 @@ on:
 # Global environment variables
 env:
   DOCKER_HUB_USER: "owolabialiu" 
-  GPT_CHART_DIR: "./.github/workflows/charts"
+  GPT_CHART_DIR: ".github/workflows/charts"
   HELM_TEMPLATE: "template.yaml"
   REGISTRY: "ghcr.io"
   CHART_OVERWRITE: "false"
