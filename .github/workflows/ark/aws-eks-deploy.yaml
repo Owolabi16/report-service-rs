@@ -1,0 +1,215 @@
+name: Amazon EKS Deployment
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (alpha, beta, gamma)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - alpha
+          - beta
+          - gamma
+  push:
+    branches:
+      - development
+      - beta
+      - gamma
+  release:
+    types: [published]
+
+env:
+  GHA_AWS_REGION: us-east-1
+  GHA_IMAGE_TAG: ${{ github.sha }}
+  GHA_SSH_PRIV_KEY: ${{ secrets.GHA_SSH_XLSX_PRIV_DEPLOY_KEY }}
+
+jobs:
+  update-ecr:
+    name: Update Report Service RS ECR
+    runs-on: [self-hosted, linux, x64]
+
+    steps:
+    - name: Set Deployment Mode
+      id: deployment-mode
+      run: |
+        # Check if manual or automatic deployment
+        if [[ "${{ github.event.inputs.environment }}" != "" ]]; then
+          echo "DEPLOY_MODE=manual" >> $GITHUB_ENV
+          echo "ALA_ENV=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+        else
+          echo "DEPLOY_MODE=auto" >> $GITHUB_ENV
+        fi
+
+    - name: Set Env to Dev (Auto Mode)
+      if: env.DEPLOY_MODE == 'auto' && endsWith(github.ref, 'gamma') != true && github.event_name == 'release' != true
+      run: |
+        echo "GHA_ENV=DEV" >> $GITHUB_ENV
+        echo "GHA_AWS_ACCESS_KEY_ID=${{ secrets.GHA_AWS_DEV_EKS_DEPLOYMENT_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+        echo "GHA_AWS_SECRET_ACCESS_KEY=${{ secrets.GHA_AWS_DEV_EKS_DEPLOYMENT_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+        echo "GHA_AWS_ECR_REPOSITORY=occasio-report-service-rs" >> $GITHUB_ENV
+
+    - name: Set Env to Prod (Auto Mode)
+      if: env.DEPLOY_MODE == 'auto' && (endsWith(github.ref, 'gamma') || github.event_name == 'release')
+      run: |
+        echo "GHA_ENV=PROD" >> $GITHUB_ENV
+        echo "GHA_AWS_ACCESS_KEY_ID=${{ secrets.GHA_AWS_PROD_EKS_DEPLOYMENT_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+        echo "GHA_AWS_SECRET_ACCESS_KEY=${{ secrets.GHA_AWS_PROD_EKS_DEPLOYMENT_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+        echo "GHA_AWS_ECR_REPOSITORY=occasio-prod/report-service-rs" >> $GITHUB_ENV
+
+    - name: Set Env to Dev (Manual Mode)
+      if: env.DEPLOY_MODE == 'manual' && (env.ALA_ENV == 'alpha' || env.ALA_ENV == 'beta')
+      run: |
+        echo "GHA_ENV=DEV" >> $GITHUB_ENV
+        echo "GHA_AWS_ACCESS_KEY_ID=${{ secrets.GHA_AWS_DEV_EKS_DEPLOYMENT_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+        echo "GHA_AWS_SECRET_ACCESS_KEY=${{ secrets.GHA_AWS_DEV_EKS_DEPLOYMENT_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+        echo "GHA_AWS_ECR_REPOSITORY=occasio-report-service-rs" >> $GITHUB_ENV
+
+    - name: Set Env to Prod (Manual Mode)
+      if: env.DEPLOY_MODE == 'manual' && env.ALA_ENV == 'gamma'
+      run: |
+        echo "GHA_ENV=PROD" >> $GITHUB_ENV
+        echo "GHA_AWS_ACCESS_KEY_ID=${{ secrets.GHA_AWS_PROD_EKS_DEPLOYMENT_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+        echo "GHA_AWS_SECRET_ACCESS_KEY=${{ secrets.GHA_AWS_PROD_EKS_DEPLOYMENT_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+        echo "GHA_AWS_ECR_REPOSITORY=occasio-prod/report-service-rs" >> $GITHUB_ENV
+
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Set Up SSH-Agent
+      uses: webfactory/ssh-agent@v0.5.1
+      with:
+        ssh-private-key: ${{ env.GHA_SSH_PRIV_KEY }}
+
+    - name: Cache
+      uses: actions/cache@v2
+      with:
+        path: |
+          # Cache the repo local .cargo that we fetch to in the next step
+          ./.cargo/registry
+          ./.cargo/git
+          ./target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install Cargo
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+
+    # Fetch the cargo deps with the current ssh-agent for access to private repos
+    # These deps are expected to be in ./.cargo by the Dockerfile
+    - name: Cargo Fetch
+      run: CARGO_HOME=./.cargo cargo fetch
+
+    - name: Configure AWS Credentials [${{ env.GHA_ENV }}]
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ env.GHA_AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ env.GHA_AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.GHA_AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, Tag, and Push to ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ env.GHA_AWS_ECR_REPOSITORY }}
+        IMAGE_TAG: ${{ env.GHA_IMAGE_TAG }}
+        DOCKER_BUILDKIT: 1
+      run: |
+        REPO_URL=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker build \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          -t $REPO_URL .
+        docker push $REPO_URL
+        # If release, push release version tag as well
+        if [[ "${GITHUB_EVENT_NAME}" == 'release' && "${DEPLOY_MODE}" == 'auto' ]]; then
+          docker tag $REPO_URL ${REPO_URL%:*}:${GITHUB_REF##*/}
+          docker push ${REPO_URL%:*}:${GITHUB_REF##*/}
+        fi
+
+  deploy-eks:
+    name: Deploy Report Service RS EKS
+    needs: update-ecr
+    runs-on: [self-hosted, linux, x64]
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+    - name: Set Deployment Mode
+      id: deployment-mode
+      run: |
+        # Check if manual or automatic deployment
+        if [[ "${{ github.event.inputs.environment }}" != "" ]]; then
+          echo "DEPLOY_MODE=manual" >> $GITHUB_ENV
+          echo "ALA_ENV=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+        else
+          echo "DEPLOY_MODE=auto" >> $GITHUB_ENV
+        fi
+
+    - name: Set Env to Dev (Auto Mode)
+      if: env.DEPLOY_MODE == 'auto' && endsWith(github.ref, 'gamma') != true && github.event_name == 'release' != true
+      run: |
+        echo "GHA_ENV=DEV" >> $GITHUB_ENV
+        echo "GHA_EKS_CLUSTER_ARN=arn:aws:eks:us-east-1:092977923196:cluster/occasio-eks-cluster" >> $GITHUB_ENV
+        echo "GHA_AWS_ECR_REPOSITORY_FULL=092977923196.dkr.ecr.us-east-1.amazonaws.com/occasio-report-service-rs" >> $GITHUB_ENV
+        if [[ ${GITHUB_REF##*/} == 'development' ]]; then echo "NAMESPACE=default" >> $GITHUB_ENV; fi
+        if [[ ${GITHUB_REF##*/} == 'beta' ]]; then echo "NAMESPACE=beta" >> $GITHUB_ENV; fi
+
+    - name: Set Env to Prod (Auto Mode)
+      if: env.DEPLOY_MODE == 'auto' && (endsWith(github.ref, 'gamma') || github.event_name == 'release')
+      run: |
+        echo "GHA_ENV=PROD" >> $GITHUB_ENV
+        echo "GHA_EKS_CLUSTER_ARN=arn:aws:eks:us-east-1:548883107094:cluster/occasio-eks-cluster-prod" >> $GITHUB_ENV
+        echo "GHA_AWS_ECR_REPOSITORY_FULL=548883107094.dkr.ecr.us-east-1.amazonaws.com/occasio-prod/report-service-rs" >> $GITHUB_ENV
+        if [[ ${GITHUB_REF##*/} == 'gamma' ]]; then echo "NAMESPACE=gamma" >> $GITHUB_ENV; fi
+        if [[ ${GITHUB_EVENT_NAME} == 'release' ]]; then
+          echo "NAMESPACE=prod" >> $GITHUB_ENV;
+          # If release, set the tag to the release tag
+          echo "IMAGE_TAG=${GITHUB_REF##*/}" >> $GITHUB_ENV
+        fi
+
+    - name: Set Env to Dev (Manual Mode)
+      if: env.DEPLOY_MODE == 'manual' && (env.ALA_ENV == 'alpha' || env.ALA_ENV == 'beta')
+      run: |
+        echo "GHA_ENV=DEV" >> $GITHUB_ENV
+        echo "GHA_EKS_CLUSTER_ARN=arn:aws:eks:us-east-1:092977923196:cluster/occasio-eks-cluster" >> $GITHUB_ENV
+        echo "GHA_AWS_ECR_REPOSITORY_FULL=092977923196.dkr.ecr.us-east-1.amazonaws.com/occasio-report-service-rs" >> $GITHUB_ENV
+        if [[ ${ALA_ENV} == 'alpha' ]]; then echo "NAMESPACE=default" >> $GITHUB_ENV; fi
+        if [[ ${ALA_ENV} == 'beta' ]]; then echo "NAMESPACE=beta" >> $GITHUB_ENV; fi
+
+    - name: Set Env to Prod (Manual Mode)
+      if: env.DEPLOY_MODE == 'manual' && env.ALA_ENV == 'gamma'
+      run: |
+        echo "GHA_ENV=PROD" >> $GITHUB_ENV
+        echo "NAMESPACE=gamma" >> $GITHUB_ENV
+        echo "GHA_EKS_CLUSTER_ARN=arn:aws:eks:us-east-1:548883107094:cluster/occasio-eks-cluster-prod" >> $GITHUB_ENV
+        echo "GHA_AWS_ECR_REPOSITORY_FULL=548883107094.dkr.ecr.us-east-1.amazonaws.com/occasio-prod/report-service-rs" >> $GITHUB_ENV
+
+    - name: Get Latest Updates From Helm Repo
+      run: helm repo update
+
+    - name: Get Current Context
+      run: kubectl config current-context
+
+    - name: Set to [${{ env.GHA_ENV }}] Context
+      run: kubectl config use-context ${{ env.GHA_EKS_CLUSTER_ARN }}
+
+    - name: Upgrade Main Helm Release
+      run: >-
+        helm upgrade
+        --install
+        --namespace=${{ env.NAMESPACE }}
+        --set image.repository=${{ env.GHA_AWS_ECR_REPOSITORY_FULL }}
+        --set image.tag=${{ env.IMAGE_TAG }}
+        reports-rs occasio-charts/reports-rs
+
+    - name: Get Upgrade Status
+      run: helm status reports-rs -n ${{ env.NAMESPACE }}
+
+    - name: Switch Back to Dev Context
+      run: kubectl config use-context arn:aws:eks:us-east-1:092977923196:cluster/occasio-eks-cluster
