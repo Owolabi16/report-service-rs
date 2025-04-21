@@ -57,7 +57,7 @@ on:
 
 # Global environment variables
 env:
-  DOCKER_HUB_USER: "owolabialiu" 
+  DOCKER_HUB_USER: "${{ github.repository_owner }}" 
   GPT_CHART_DIR: ".github/workflows/charts"
   HELM_TEMPLATE: "template.yaml"
   REGISTRY: "ghcr.io"
@@ -166,11 +166,11 @@ jobs:
         uses: appany/helm-oci-chart-releaser@v0.4.0
         with:
           name: ${{ env.CHART_NAME }}
-          repository: owolabialiu/charts
+          repository: ${{ github.repository_owner }}/charts
           tag: ${{ env.CHART_TAG }}
           path: ${{ env.GPT_CHART_DIR }}
           registry: ghcr.io
-          registry_username: owolabialiu
+          registry_username: ${{ github.repository_owner }}
           registry_password: ${{ secrets.PAT_TOKEN }}
         env:
           HELM_EXPERIMENTAL_OCI: 1   
